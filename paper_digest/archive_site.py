@@ -924,7 +924,7 @@ def _latest_recommendation_papers(archives: list[DayArchive]) -> list[PaperArchi
                 papers.append(paper)
         if papers:
             papers.sort(key=lambda item: (-item.relevance_score, item.title.lower()))
-            return papers
+            return papers[:1]
     return []
 
 
