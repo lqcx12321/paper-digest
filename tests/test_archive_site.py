@@ -418,8 +418,8 @@ class ArchiveSiteTests(unittest.TestCase):
 
             index_html = (site_path / "index.html").read_text(encoding="utf-8")
             self.assertIn("Agent Systems", index_html)
-            self.assertIn("Benchmark Design", index_html)
             self.assertIn("主要内容", index_html)
+            self.assertNotIn("Benchmark Design", index_html)
 
     def _write_digest(
         self,
