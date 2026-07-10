@@ -34,6 +34,15 @@ class ArchiveSiteTests(unittest.TestCase):
                                 "authors": ["Alice", "Bob"],
                                 "tags": ["方法"],
                                 "topics": ["Agent"],
+                                "analysis": {
+                                    "conclusion": "合并多源论文元数据，便于统一追踪。",
+                                    "contributions": [
+                                        "提出跨源论文身份对齐方法",
+                                        "提供可复用的归档站点结构",
+                                    ],
+                                    "audience": "研究助理与文献追踪者",
+                                    "limitations": ["依赖外部源稳定性"],
+                                },
                                 "source_variants": [
                                     "arxiv",
                                     "openalex",
@@ -245,21 +254,15 @@ class ArchiveSiteTests(unittest.TestCase):
                 for path in (site_path / "papers").glob("*.html")
                 if "<h1>Paper Circle</h1>" in path.read_text(encoding="utf-8")
             ).read_text(encoding="utf-8")
-            self.assertIn("研究日报归档页", index_html)
-            self.assertIn("订阅入口", index_html)
-            self.assertIn("最近 7 天", index_html)
+            self.assertIn("今日推荐", index_html)
             self.assertIn("Paper Circle", index_html)
-            self.assertIn("papers/", index_html)
-            self.assertIn("momentum.html", index_html)
-            self.assertIn("notification-history.html", index_html)
-            self.assertIn("weekly-review.html", index_html)
-            self.assertIn("reading-list.html", index_html)
-            self.assertIn("review-queue.html", index_html)
-            self.assertIn("digests/2026-04-08/digest.md", index_html)
+            self.assertIn("合并多源论文元数据，便于统一追踪。", index_html)
+            self.assertIn("提出跨源论文身份对齐方法", index_html)
+            self.assertIn("A canonical paper with merged source links.", index_html)
+            self.assertIn("Agent", index_html)
+            self.assertIn("方法", index_html)
+            self.assertIn("打开原文", index_html)
             self.assertIn("2026-04-08 23:59:44 (Asia/Shanghai)", index_html)
-            self.assertIn('data-feed-names="|llm|vision|"', index_html)
-            self.assertIn("feeds/llm.html", index_html)
-            self.assertIn("topics/agent.html", index_html)
             self.assertIn("趋势与订阅总览", trends_html)
             self.assertIn("持续升温论文", trends_html)
             self.assertIn("momentum.html", trends_html)
@@ -414,10 +417,9 @@ class ArchiveSiteTests(unittest.TestCase):
             site_path = build_archive_site(output_dir, tracked_keywords=["agent"])
 
             index_html = (site_path / "index.html").read_text(encoding="utf-8")
-            self.assertIn(
-                "收录 2 篇，重点包括《Agent Systems》、《Benchmark Design》。",
-                index_html,
-            )
+            self.assertIn("Agent Systems", index_html)
+            self.assertIn("Benchmark Design", index_html)
+            self.assertIn("主要内容", index_html)
 
     def _write_digest(
         self,

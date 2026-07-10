@@ -64,6 +64,11 @@ class PaperArchive:
     feedback_snoozed_until: date | None
     feedback_review_interval_days: int | None
     search_text: str
+    conclusion: str = ""
+    contributions: tuple[str, ...] = ()
+    audience: str = ""
+    limitations: tuple[str, ...] = ()
+    feed_name: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -413,7 +418,12 @@ def _parse_feed(
             f"invalid papers for feed {name!r} in {digest_json_path}"
         )
 
-    papers = _parse_papers(raw_papers, digest_json_path, generated_at)
+    papers = _parse_papers(
+        raw_papers,
+        digest_json_path,
+        generated_at,
+        feed_name=name.strip(),
+    )
     raw_key_points = raw_feed.get("key_points")
     key_points = (
         [
@@ -440,6 +450,8 @@ def _parse_papers(
     raw_papers: list[object],
     digest_json_path: Path,
     generated_at: datetime,
+    *,
+    feed_name: str = "",
 ) -> list[PaperArchive]:
     papers: list[PaperArchive] = []
     for raw_paper in raw_papers:
@@ -494,6 +506,9 @@ def _parse_papers(
         source_variants = _normalize_string_list(raw_source_variants)
         if normalized_source not in {item.lower() for item in source_variants}:
             source_variants.append(normalized_source)
+        conclusion, contributions, audience, limitations = _parse_paper_analysis(
+            raw_paper.get("analysis")
+        )
         papers.append(
             PaperArchive(
                 canonical_id=normalized_canonical_id,
@@ -543,7 +558,9 @@ def _parse_papers(
                         [
                             title,
                             normalized_summary,
+                            conclusion,
                             reason_summary,
+                            " ".join(contributions),
                             " ".join(_normalize_string_list(raw_paper.get("tags", []))),
                             " ".join(
                                 _normalize_string_list(raw_paper.get("topics", []))
@@ -554,9 +571,26 @@ def _parse_papers(
                         ]
                     )
                 ),
+                conclusion=conclusion,
+                contributions=tuple(contributions),
+                audience=audience,
+                limitations=tuple(limitations),
+                feed_name=feed_name,
             )
         )
     return papers
+
+
+def _parse_paper_analysis(
+    raw_analysis: object,
+) -> tuple[str, list[str], str, list[str]]:
+    if not isinstance(raw_analysis, dict):
+        return "", [], "", []
+    conclusion = _optional_clean_string(raw_analysis.get("conclusion")) or ""
+    audience = _optional_clean_string(raw_analysis.get("audience")) or ""
+    contributions = _normalize_string_list(raw_analysis.get("contributions", []))
+    limitations = _normalize_string_list(raw_analysis.get("limitations", []))
+    return conclusion, contributions, audience, limitations
 
 
 def _build_feed_summary(
@@ -834,61 +868,143 @@ def _render_index(
     feed_overviews: list[FeedOverview],
     keyword_overviews: list[KeywordOverview],
 ) -> str:
+    del feed_overviews, keyword_overviews
     latest_archive = archives[0] if archives else None
-    feed_names = [overview.name for overview in feed_overviews]
-    stats = [
-        _build_stats("最近 7 天", archives, 7),
-        _build_stats("最近 30 天", archives, 30),
-        _build_stats("全部归档", archives, None),
-    ]
-    cards_html = (
-        "\n".join(_render_day_card(day) for day in archives) or _render_empty_state()
-    )
-    feed_options = "\n".join(
-        f'<option value="{escape(name)}">{escape(name)}</option>' for name in feed_names
-    )
+    papers = _latest_recommendation_papers(archives)
     latest_label = _latest_label(latest_archive)
-    content = (
-        _render_subscription_panel(feed_overviews, keyword_overviews)
-        + '<section class="section-grid">'
-        + "".join(_render_stats_card(item) for item in stats)
-        + "</section>"
-        + _render_filter_panel(feed_options)
-        + '<section class="archive-grid" id="archive-grid">'
-        + cards_html
-        + "</section>"
-        + (
-            '<section class="empty hidden" id="empty-state">'
-            "当前筛选条件下没有匹配的归档。"
-            "</section>"
+    if not archives:
+        content = _render_empty_state("还没有生成过推荐。跑一次 Daily Digest 后这里会显示今日论文。")
+    elif not papers:
+        content = _render_empty_state("今日暂无新推荐论文（可能已被去重，或检索窗口内无新命中）。")
+    else:
+        content = (
+            '<section class="reco-stack" id="today-recommendations">'
+            + "\n".join(
+                _render_recommendation_paper(paper, index=index)
+                for index, paper in enumerate(papers, start=1)
+            )
+            + "</section>"
         )
-    )
 
     return _render_page(
-        page_title="Paper Digest Archive",
-        eyebrow="Paper Digest Archive",
-        heading="研究日报归档页",
-        description=(
-            "汇总每天生成的 digest.json 和 digest.md，支持按 feed 过滤、"
-            "按标题关键词搜索，"
-            "并提供固定 feed 页面、关键词长期追踪页、持续升温视图，"
-            "阅读清单、周度回顾，以及最近 7 天 / 30 天趋势页。"
-        ),
+        page_title="今日论文推荐",
+        eyebrow="WEDM Daily",
+        heading="今日推荐",
+        description="只看今天值得读的一篇（或几篇）：主要内容、创新点与关键词，打开原文即可。",
         hero_links=_render_hero_links(
             [
-                ("latest.md", "查看最新 Markdown"),
-                ("latest.json", "查看最新 JSON"),
-                ("trends.html", "查看趋势总览"),
-                ("momentum.html", "持续升温论文"),
-                ("notification-history.html", "通知历史"),
-                ("weekly-review.html", "周度回顾"),
-                (None, f"最近构建：{latest_label}"),
+                (None, f"更新于 {latest_label}"),
             ]
         ),
         content=content,
         nav_current="home",
-        extra_script=_render_index_script(),
     )
+
+
+def _latest_recommendation_papers(archives: list[DayArchive]) -> list[PaperArchive]:
+    if not archives:
+        return []
+    papers: list[PaperArchive] = []
+    seen: set[str] = set()
+    for feed in archives[0].feeds:
+        for paper in feed.papers:
+            if paper.canonical_id in seen:
+                continue
+            seen.add(paper.canonical_id)
+            papers.append(paper)
+    papers.sort(key=lambda item: (-item.relevance_score, item.title.lower()))
+    return papers
+
+
+def _render_recommendation_paper(paper: PaperArchive, *, index: int) -> str:
+    keywords = _recommendation_keywords(paper)
+    keyword_html = (
+        '<div class="keyword-row">'
+        + "".join(f'<span class="keyword-chip">{escape(item)}</span>' for item in keywords)
+        + "</div>"
+        if keywords
+        else '<p class="reco-empty">暂无关键词</p>'
+    )
+    main_content = paper.conclusion or paper.summary
+    main_html = (
+        f'<p class="reco-body">{escape(main_content)}</p>'
+        if main_content
+        else '<p class="reco-empty">摘要暂缺，可直接打开原文阅读。</p>'
+    )
+    innovation_items = list(paper.contributions)
+    if innovation_items:
+        innovation_html = (
+            "<ul class=\"reco-list\">"
+            + "".join(f"<li>{escape(item)}</li>" for item in innovation_items)
+            + "</ul>"
+        )
+    else:
+        innovation_html = (
+            '<p class="reco-empty">'
+            "暂无结构化创新点。开启 LLM 分析后，这里会显示主要贡献。"
+            "</p>"
+        )
+    authors = "、".join(paper.authors[:4]) if paper.authors else "作者未知"
+    if len(paper.authors) > 4:
+        authors += " 等"
+    feed_label = paper.feed_name or paper.source
+    meta_bits = [
+        authors,
+        feed_label,
+        paper.published_at.strftime("%Y-%m-%d"),
+    ]
+    if paper.relevance_score > 0:
+        meta_bits.append(f"相关度 {paper.relevance_score}")
+    actions = [
+        f'<a class="reco-action primary" href="{escape(paper.href)}" '
+        'target="_blank" rel="noreferrer">打开原文</a>'
+    ]
+    if paper.pdf_url:
+        actions.append(
+            f'<a class="reco-action" href="{escape(paper.pdf_url)}" '
+            'target="_blank" rel="noreferrer">PDF</a>'
+        )
+    if paper.doi:
+        actions.append(
+            f'<a class="reco-action" href="https://doi.org/{escape(paper.doi)}" '
+            'target="_blank" rel="noreferrer">DOI</a>'
+        )
+    kicker = "今日推荐" if index == 1 else f"推荐 {index}"
+    return (
+        f'<article class="reco-paper{" is-primary" if index == 1 else ""}">'
+        f'<p class="reco-kicker">{escape(kicker)}</p>'
+        f'<h2 class="reco-title">'
+        f'<a href="{escape(paper.href)}" target="_blank" rel="noreferrer">'
+        f"{escape(paper.title)}</a></h2>"
+        f'<p class="reco-meta">{escape(" · ".join(meta_bits))}</p>'
+        '<section class="reco-block">'
+        "<h3>关键词</h3>"
+        f"{keyword_html}"
+        "</section>"
+        '<section class="reco-block">'
+        "<h3>主要内容</h3>"
+        f"{main_html}"
+        "</section>"
+        '<section class="reco-block">'
+        "<h3>创新点</h3>"
+        f"{innovation_html}"
+        "</section>"
+        f'<div class="reco-actions">{"".join(actions)}</div>'
+        "</article>"
+    )
+
+
+def _recommendation_keywords(paper: PaperArchive) -> list[str]:
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for item in [*paper.topics, *paper.tags, *paper.categories]:
+        normalized = item.strip()
+        key = normalized.casefold()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        keywords.append(normalized)
+    return keywords[:12]
 
 
 def _render_trends_page(
@@ -2349,6 +2465,9 @@ def _render_page(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(page_title)}</title>
   {rss_link}
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@500;700&display=swap" rel="stylesheet">
   <style>{_site_styles()}</style>
 </head>
 <body>
@@ -2689,18 +2808,7 @@ def _render_rss_item(item: SubscriptionItem) -> str:
 
 def _render_nav(current: str, link_prefix: str) -> str:
     items = [
-        ("home", f"{link_prefix}index.html", "归档首页"),
-        ("trends", f"{link_prefix}trends.html", "趋势总览"),
-        ("review_queue", f"{link_prefix}review-queue.html", "行动队列"),
-        (
-            "notification_history",
-            f"{link_prefix}notification-history.html",
-            "通知历史",
-        ),
-        ("momentum", f"{link_prefix}momentum.html", "持续升温"),
-        ("weekly_review", f"{link_prefix}weekly-review.html", "周度回顾"),
-        ("reading_list", f"{link_prefix}reading-list.html", "阅读清单"),
-        ("papers", f"{link_prefix}index.html", "论文详情"),
+        ("home", f"{link_prefix}index.html", "今日推荐"),
     ]
     return (
         '<nav class="top-nav">'
@@ -3418,18 +3526,18 @@ def _related_reason_summary(
 def _site_styles() -> str:
     return """
     :root {
-      --bg: #f4efe6;
-      --bg-accent: #e4dcc8;
-      --panel: rgba(255, 252, 246, 0.9);
-      --panel-strong: #fffaf1;
-      --text: #1f1a16;
-      --muted: #675e56;
-      --line: rgba(74, 56, 42, 0.18);
-      --brand: #9a3412;
-      --brand-soft: #f97316;
-      --shadow: 0 18px 40px rgba(86, 55, 25, 0.12);
-      --radius: 22px;
-      --max: 1180px;
+      --bg: #eef2f6;
+      --bg-accent: #d9e2ec;
+      --panel: rgba(255, 255, 255, 0.92);
+      --panel-strong: #ffffff;
+      --text: #15202b;
+      --muted: #5b6b7c;
+      --line: rgba(21, 32, 43, 0.12);
+      --brand: #0f766e;
+      --brand-soft: #14b8a6;
+      --shadow: 0 16px 36px rgba(21, 32, 43, 0.08);
+      --radius: 18px;
+      --max: 820px;
     }
 
     * {
@@ -3439,12 +3547,12 @@ def _site_styles() -> str:
     body {
       margin: 0;
       min-height: 100vh;
-      font-family: "IBM Plex Sans", "Segoe UI Variable", sans-serif;
+      font-family: "Noto Sans SC", "Segoe UI", sans-serif;
       color: var(--text);
       background:
-        radial-gradient(circle at top left, rgba(249, 115, 22, 0.18), transparent 30%),
-        radial-gradient(circle at top right, rgba(180, 83, 9, 0.12), transparent 24%),
-        linear-gradient(180deg, var(--bg) 0%, #f8f5ef 100%);
+        radial-gradient(circle at top left, rgba(20, 184, 166, 0.14), transparent 34%),
+        radial-gradient(circle at top right, rgba(15, 118, 110, 0.08), transparent 28%),
+        linear-gradient(180deg, #f5f8fb 0%, var(--bg) 100%);
     }
 
     a {
@@ -3495,11 +3603,11 @@ def _site_styles() -> str:
     .hero {
       position: relative;
       overflow: hidden;
-      padding: 32px;
+      padding: 28px 32px;
       border: 1px solid var(--line);
-      border-radius: calc(var(--radius) + 6px);
+      border-radius: calc(var(--radius) + 4px);
       background:
-        linear-gradient(135deg, rgba(255, 250, 241, 0.98), rgba(243, 234, 215, 0.92));
+        linear-gradient(160deg, rgba(255, 255, 255, 0.98), rgba(236, 245, 243, 0.92));
       box-shadow: var(--shadow);
     }
 
@@ -3507,10 +3615,10 @@ def _site_styles() -> str:
       content: "";
       position: absolute;
       inset: auto -80px -120px auto;
-      width: 260px;
-      height: 260px;
+      width: 220px;
+      height: 220px;
       border-radius: 50%;
-      background: radial-gradient(circle, rgba(249, 115, 22, 0.12), transparent 65%);
+      background: radial-gradient(circle, rgba(20, 184, 166, 0.16), transparent 65%);
       pointer-events: none;
     }
 
@@ -3524,15 +3632,15 @@ def _site_styles() -> str:
 
     h1 {
       margin: 0;
-      font-family: "Source Serif 4", Georgia, serif;
-      font-size: clamp(2.2rem, 5vw, 4.2rem);
-      line-height: 0.98;
+      font-family: "Noto Serif SC", "Songti SC", serif;
+      font-size: clamp(2rem, 4.5vw, 3.2rem);
+      line-height: 1.15;
     }
 
     .hero p {
-      max-width: 780px;
-      margin: 18px 0 0;
-      font-size: 1.03rem;
+      max-width: 720px;
+      margin: 14px 0 0;
+      font-size: 1.02rem;
       line-height: 1.7;
       color: var(--muted);
     }
@@ -3541,7 +3649,133 @@ def _site_styles() -> str:
       display: flex;
       flex-wrap: wrap;
       gap: 12px;
-      margin-top: 24px;
+      margin-top: 20px;
+    }
+
+    .reco-stack {
+      display: grid;
+      gap: 22px;
+      margin-top: 28px;
+    }
+
+    .reco-paper {
+      padding: 28px 30px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-strong);
+      box-shadow: var(--shadow);
+    }
+
+    .reco-paper.is-primary {
+      border-color: rgba(15, 118, 110, 0.28);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 1), rgba(240, 250, 248, 0.96));
+    }
+
+    .reco-kicker {
+      margin: 0 0 10px;
+      font-size: 0.82rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--brand);
+      font-weight: 700;
+    }
+
+    .reco-title {
+      margin: 0;
+      font-family: "Noto Serif SC", "Songti SC", serif;
+      font-size: clamp(1.35rem, 3vw, 1.85rem);
+      line-height: 1.35;
+    }
+
+    .reco-title a {
+      text-decoration: none;
+    }
+
+    .reco-title a:hover {
+      color: var(--brand);
+    }
+
+    .reco-meta {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+
+    .reco-block {
+      margin-top: 22px;
+    }
+
+    .reco-block h3 {
+      margin: 0 0 10px;
+      font-size: 0.92rem;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .reco-body,
+    .reco-list {
+      margin: 0;
+      font-size: 1.05rem;
+      line-height: 1.75;
+    }
+
+    .reco-list {
+      padding-left: 1.2em;
+    }
+
+    .reco-list li + li {
+      margin-top: 8px;
+    }
+
+    .reco-empty {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.98rem;
+      line-height: 1.6;
+    }
+
+    .keyword-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .keyword-chip {
+      display: inline-flex;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: rgba(15, 118, 110, 0.1);
+      color: #0f5f59;
+      font-size: 0.88rem;
+      font-weight: 500;
+    }
+
+    .reco-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 26px;
+    }
+
+    .reco-action {
+      display: inline-flex;
+      align-items: center;
+      padding: 11px 16px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #fff;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+
+    .reco-action.primary {
+      background: linear-gradient(135deg, var(--brand), var(--brand-soft));
+      color: #fff;
+      border-color: transparent;
     }
 
     .section-grid,
