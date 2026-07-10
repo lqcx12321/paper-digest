@@ -872,13 +872,22 @@ def _render_index(
     latest_archive = archives[0] if archives else None
     papers = _latest_recommendation_papers(archives)
     latest_label = _latest_label(latest_archive)
+    fallback_date = _recommendation_day_label(archives)
     if not archives:
         content = _render_empty_state("还没有生成过推荐。跑一次 Daily Digest 后这里会显示今日论文。")
     elif not papers:
         content = _render_empty_state("今日暂无新推荐论文（可能已被去重，或检索窗口内无新命中）。")
     else:
+        notice = ""
+        if fallback_date is not None:
+            notice = (
+                '<p class="reco-notice">'
+                f"今日暂无新命中，以下展示最近一次有推荐的结果（{escape(fallback_date)}）。"
+                "</p>"
+            )
         content = (
-            '<section class="reco-stack" id="today-recommendations">'
+            notice
+            + '<section class="reco-stack" id="today-recommendations">'
             + "\n".join(
                 _render_recommendation_paper(paper, index=index)
                 for index, paper in enumerate(papers, start=1)
@@ -904,16 +913,28 @@ def _render_index(
 def _latest_recommendation_papers(archives: list[DayArchive]) -> list[PaperArchive]:
     if not archives:
         return []
-    papers: list[PaperArchive] = []
-    seen: set[str] = set()
-    for feed in archives[0].feeds:
-        for paper in feed.papers:
-            if paper.canonical_id in seen:
-                continue
-            seen.add(paper.canonical_id)
-            papers.append(paper)
-    papers.sort(key=lambda item: (-item.relevance_score, item.title.lower()))
-    return papers
+    for day in archives:
+        papers: list[PaperArchive] = []
+        seen: set[str] = set()
+        for feed in day.feeds:
+            for paper in feed.papers:
+                if paper.canonical_id in seen:
+                    continue
+                seen.add(paper.canonical_id)
+                papers.append(paper)
+        if papers:
+            papers.sort(key=lambda item: (-item.relevance_score, item.title.lower()))
+            return papers
+    return []
+
+
+def _recommendation_day_label(archives: list[DayArchive]) -> str | None:
+    for day in archives:
+        if any(feed.papers for feed in day.feeds):
+            if day is archives[0]:
+                return None
+            return day.date
+    return None
 
 
 def _render_recommendation_paper(paper: PaperArchive, *, index: int) -> str:
@@ -3776,6 +3797,16 @@ def _site_styles() -> str:
       background: linear-gradient(135deg, var(--brand), var(--brand-soft));
       color: #fff;
       border-color: transparent;
+    }
+
+    .reco-notice {
+      margin: 22px 0 0;
+      padding: 12px 16px;
+      border-radius: 12px;
+      background: rgba(15, 118, 110, 0.08);
+      color: #0f5f59;
+      font-size: 0.95rem;
+      line-height: 1.5;
     }
 
     .section-grid,
